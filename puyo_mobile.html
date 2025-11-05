@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>ぷよぷよ風ゲーム</title>
+  <style>
+    body { background: #222; color: #fff; text-align: center; font-size: 32px; }
+    canvas { background: #333; margin: 40px auto; display: block; border: 4px solid #fff; }
+    h1 { font-family: 'Arial Black', sans-serif; font-size: 56px; }
+    button { 
+      background: #444; color: #fff; border: none; border-radius: 10px; 
+      cursor: pointer; font-size: 72px; margin: 12px; 
+      width: 192px; height: 192px; 
+    }
+    button:active { background: #666; }
+    #touch-controls { left: 20px; bottom: 60px; }
+    #rotate-controls { right: 20px; bottom: 60px; }
+    #chain { font-size: 48px !important; }
+    #next, #next2 { width: 128px !important; height: 128px !important; }
+    .next-label { font-size: 32px; }
+  </style>
+</head>
+<body>
+  <h1>ぷよぷよ風ゲーム</h1>
+  <canvas id="game" width="384" height="768"></canvas>
+  <div style="position: absolute; top: 40px; right: 80px; text-align: center;">
+    <span class="next-label" style="color:#fff;">Next</span><br>
+    <canvas id="next" width="128" height="128" style="display:block;margin:0 auto;"></canvas>
+    <span class="next-label" style="color:#fff;">Next2</span><br>
+    <canvas id="next2" width="128" height="128" style="display:block;margin:0 auto;"></canvas>
+  </div>
+  <div style="position: absolute; top: 420px; right: 80px; text-align: center;">
+    <div id="chain" style="font-size:48px; color:#ff0; margin:20px;"></div>
+  </div>
+  <div id="touch-controls" style="position: absolute; left: 20px; bottom: 60px; z-index: 10;">
+    <button id="left-btn" style="width:140px;height:140px;font-size:80px;">←</button>
+    <button id="down-btn" style="width:140px;height:140px;font-size:80px;">↓</button>
+    <button id="right-btn" style="width:140px;height:140px;font-size:80px;">→</button>
+  </div>
+  <div id="rotate-controls" style="position: absolute; right: 20px; bottom: 60px; z-index: 10;">
+    <button id="rot-l-btn" style="width:140px;height:140px;font-size:60px;">⟲</button>
+    <button id="rot-r-btn" style="width:140px;height:140px;font-size:60px;">⟳</button>
+  </div>
+  <p style="font-size:32px;">z x: 回転　←↓→: 移動・落下</p>
+  <script>
+    const COLS = 6, ROWS = 12, PUYO_SIZE = 64;
+    const COLORS = [null, '#ff5555', 'green', 'blue', 'yellow'];
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    let field = Array.from({length: ROWS + 1}, () => Array(COLS).fill(0));
+    let current = null, next = null, next2 = null, gameOver = false;
+    let chainCount = 0;
+    let lastChain = 0;
+    let eraseAnim = false;
+    let eraseAnimCells = [];
+    let eraseAnimTimer = 0;
+    const ERASE_ANIM_DURATION = 60; // 連鎖消去アニメーションのフレーム数（元の2倍で速度半分）
+
+    let lockDelay = 30; // ロック遅延フレーム数（ぷよぷよ通は約0.5秒）
+    let lockTimer = 0;
+    let isTouching = false;
+    let puyoY = 0; // 描画用の滑らかなY座標
+
+    function randomPuyo() {
+      return [1 + Math.floor(Math.random() * 4), 1 + Math.floor(Math.random() * 4)];
+    }
+
+    function spawn() {
+      if (!next) next = randomPuyo();
+      if (!next2) next2 = randomPuyo();
+      current = {
+        x: 2, y: 0,
+        puyos: next,
+        dir: 0
+      };
+      puyoY = 0; // 新しいぷよの描画Yもリセット
+      next = next2;
+      next2 = randomPuyo();
+      if (!canMove(0,0,0)) gameOver = true;
+    }
+
+    function canMove(dx, dy, rot) {
+      const [mx, my] = [current.x + dx, current.y + dy];
+      const [sx, sy] = getSubPos(mx, my, (current.dir + rot) % 4);
+      return [
+        [mx, my],
+        [sx, sy]
+      ].every(([x, y]) => x >= 0 && x < COLS && y < ROWS + 1 && (y < 0 || field[y][x] === 0));
+    }
+
+    function getSubPos(x, y, dir) {
+      if (dir === 0) return [x, y-1];
+      if (dir === 1) return [x+1, y];
+      if (dir === 2) return [x, y+1];
+      return [x-1, y];
+    }
+
+    function fixPuyo() {
+      const [mx, my] = [current.x, current.y];
+      const [sx, sy] = getSubPos(mx, my, current.dir);
+      if (my >= 0) field[my][mx] = current.puyos[0];
+      if (sy >= 0) field[sy][sx] = current.puyos[1];
+    }
+
+    function dropPuyos() {
+      let moved = false;
+      for (let x = 0; x < COLS; x++) {
+        for (let y = ROWS+1-2; y >= 0; y--) {
+          if (field[y][x] && !field[y+1][x]) {
+            field[y+1][x] = field[y][x];
+            field[y][x] = 0;
+            moved = true;
+          }
+        }
+      }
+      return moved;
+    }
+
+    function erasePuyos() {
+      let visited = Array.from({length: ROWS + 1}, () => Array(COLS).fill(false));
+      let erased = false;
+      let erasedThis = false;
+      let toErase = [];
+      for (let y = 0; y < ROWS + 1; y++) {
+        for (let x = 0; x < COLS; x++) {
+          if (field[y][x] && !visited[y][x]) {
+            let q = [[x, y]], puyo = field[y][x], group = [];
+            while (q.length) {
+              let [cx, cy] = q.pop();
+              if (cx < 0 || cx >= COLS || cy < 0 || cy >= ROWS + 1) continue;
+              if (visited[cy][cx] || field[cy][cx] !== puyo) continue;
+              visited[cy][cx] = true;
+              group.push([cx, cy]);
+              q.push([cx+1, cy], [cx-1, cy], [cx, cy+1], [cx, cy-1]);
+            }
+            if (group.length >= 4) {
+              group.forEach(([gx, gy]) => toErase.push([gx, gy]));
+              erased = true;
+              erasedThis = true;
+            }
+          }
+        }
+      }
+      if (erasedThis) {
+        chainCount++;
+        eraseAnim = true;
+        eraseAnimCells = toErase;
+        eraseAnimTimer = ERASE_ANIM_DURATION;
+      }
+      if (erasedThis) return 'anim';
+      return erased;
+    }
+
+    // nextぷよ描画用
+    const nextCanvas = document.getElementById('next');
+    const nextCtx = nextCanvas.getContext('2d');
+    const next2Canvas = document.getElementById('next2');
+    const next2Ctx = next2Canvas.getContext('2d');
+
+    function drawNext() {
+      // 1つ目
+      nextCtx.clearRect(0,0,nextCanvas.width,nextCanvas.height);
+      if (next) {
+        nextCtx.fillStyle = COLORS[next[1]];
+        nextCtx.beginPath();
+        nextCtx.arc(64, 40, 28, 0, Math.PI*2);
+        nextCtx.fill();
+        nextCtx.fillStyle = COLORS[next[0]];
+        nextCtx.beginPath();
+        nextCtx.arc(64, 88, 28, 0, Math.PI*2);
+        nextCtx.fill();
+      }
+      // 2つ目
+      next2Ctx.clearRect(0,0,next2Canvas.width,next2Canvas.height);
+      if (next2) {
+        next2Ctx.fillStyle = COLORS[next2[1]];
+        next2Ctx.beginPath();
+        next2Ctx.arc(64, 40, 28, 0, Math.PI*2);
+        next2Ctx.fill();
+        next2Ctx.fillStyle = COLORS[next2[0]];
+        next2Ctx.beginPath();
+        next2Ctx.arc(64, 88, 28, 0, Math.PI*2);
+        next2Ctx.fill();
+      }
+    }
+
+    function draw() {
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      // Draw field
+      for (let y = 1; y < ROWS + 1; y++) {
+        for (let x = 0; x < COLS; x++) {
+          let isErasing = eraseAnim && eraseAnimCells.some(([ex, ey]) => ex === x && ey === y);
+          // currentぷよの位置は描画しない
+          let isCurrentMain = current && x === current.x && y === Math.round(puyoY);
+          let [subX, subY] = current ? getSubPos(current.x, Math.round(puyoY), current.dir) : [-1, -1];
+          let isCurrentSub = current && x === subX && y === subY;
+          if (field[y][x] && !isErasing && !isCurrentMain && !isCurrentSub) {
+            ctx.fillStyle = COLORS[field[y][x]];
+            ctx.beginPath();
+            ctx.arc(x*PUYO_SIZE+PUYO_SIZE/2, (y - 1)*PUYO_SIZE+PUYO_SIZE/2, PUYO_SIZE/2-2, 0, Math.PI*2);
+            ctx.fill();
+          }
+          // 消去アニメーション: 消えるぷよを半透明で描画
+          if (isErasing) {
+            ctx.globalAlpha = Math.max(0.2, eraseAnimTimer / ERASE_ANIM_DURATION);
+            ctx.fillStyle = COLORS[field[y][x]];
+            ctx.beginPath();
+            ctx.arc(x*PUYO_SIZE+PUYO_SIZE/2, (y - 1)*PUYO_SIZE+PUYO_SIZE/2, PUYO_SIZE/2-2, 0, Math.PI*2);
+            ctx.fill();
+            ctx.globalAlpha = 1.0;
+          }
+        }
+      }
+      // Draw current puyo（滑らかに描画）
+      if (current) {
+        let drawY = puyoY;
+        ctx.fillStyle = COLORS[current.puyos[0]];
+        ctx.beginPath();
+        ctx.arc(current.x*PUYO_SIZE+PUYO_SIZE/2, (drawY - 1)*PUYO_SIZE+PUYO_SIZE/2, PUYO_SIZE/2-2, 0, Math.PI*2);
+        ctx.fill();
+        const [sx, sy] = getSubPos(current.x, Math.round(drawY), current.dir);
+        let subDrawY = drawY + (sy - current.y);
+        ctx.fillStyle = COLORS[current.puyos[1]];
+        ctx.beginPath();
+        ctx.arc(sx*PUYO_SIZE+PUYO_SIZE/2, (subDrawY - 1)*PUYO_SIZE+PUYO_SIZE/2, PUYO_SIZE/2-2, 0, Math.PI*2);
+        ctx.fill();
+      }
+      if (gameOver) {
+        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        ctx.fillRect(0,0,canvas.width,canvas.height);
+        ctx.fillStyle = '#fff';
+        ctx.font = '32px sans-serif';
+        ctx.fillText('Game Over', 20, canvas.height/2);
+      }
+      drawNext();
+      // 連鎖数表示
+      const chainDiv = document.getElementById('chain');
+      if (chainCount > 1 && eraseAnim) {
+        chainDiv.textContent = chainCount + ' 連鎖!';
+      } else if (lastChain > 1 && !eraseAnim) {
+        chainDiv.textContent = lastChain + ' 連鎖!';
+      } else {
+        chainDiv.textContent = '';
+      }
+    }
+
+    // 回転時の壁蹴り・床蹴り対応
+    function tryRotate(dirDelta) {
+      let newDir = (current.dir + dirDelta + 4) % 4;
+      // 通常回転
+      if (canMove(0, 0, dirDelta)) {
+        current.dir = newDir;
+        return;
+      }
+      // 壁蹴り（左右1マスずらし）
+      if (canMove(-1, 0, dirDelta)) {
+        current.x--;
+        current.dir = newDir;
+        return;
+      }
+      if (canMove(1, 0, dirDelta)) {
+        current.x++;
+        current.dir = newDir;
+        return;
+      }
+      // 床蹴り（上に1マスずらし）
+      if (canMove(0, -1, dirDelta)) {
+        current.y--;
+        current.dir = newDir;
+        return;
+      }
+    }
+
+    let dropTimer = 0, dropInterval = 75, state = 'fall', count = 12; // 落下速度をさらに遅く
+    function gameLoop() {
+      if (gameOver) return draw();
+      if (eraseAnim) {
+        eraseAnimTimer--;
+        draw();
+        if (eraseAnimTimer <= 0) {
+          eraseAnimCells.forEach(([x, y]) => field[y][x] = 0);
+          eraseAnim = false;
+          eraseAnimCells = [];
+          if (state === 'erase') {
+            if (erasePuyos() === 'anim') {
+            } else {
+              lastChain = chainCount;
+              state = 'drop';
+            }
+          }
+        }
+        requestAnimationFrame(gameLoop);
+        return;
+      }
+      if (state === 'fall') {
+        dropTimer++;
+        let softDrop = false;
+        if (window.softDrop) {
+          dropInterval = 2;
+          softDrop = true;
+        } else {
+          dropInterval = 90; // 通常落下速度をさらに遅く
+        }
+        // 滑らかに落下
+        let targetY = current.y;
+        let speed = softDrop ? 0.5 : 0.15;
+        if (puyoY < targetY) {
+          puyoY += speed;
+          if (puyoY > targetY) puyoY = targetY;
+        } else {
+          puyoY = targetY;
+        }
+        if (canMove(0,1,0)) {
+          isTouching = false;
+          lockTimer = 0;
+          if (dropTimer >= dropInterval) {
+            dropTimer = 0;
+            current.y++;
+          }
+        } else {
+          // 接地
+          if (!isTouching) {
+            isTouching = true;
+            lockTimer = lockDelay;
+          } else {
+            lockTimer--;
+            // ロック遅延中に移動・回転があればリセット（下のkeydownで実装）
+            if (lockTimer <= 0) {
+              fixPuyo();
+              state = 'drop';
+              chainCount = 0;
+              isTouching = false;
+            }
+          }
+        }
+      } else if (state === 'erase') {
+        let eraseResult = erasePuyos();
+        if (eraseResult === 'anim') {
+        } else if (eraseResult) {
+          state = 'drop';
+        } else {
+          lastChain = chainCount;
+	  state = 'fall';
+          spawn();
+          lastChain = 0;
+        }
+      } else if (state === 'drop') {
+	if (count > 0) {
+          dropPuyos()
+	  count = count - 1;
+	} else {
+          state = 'erase';
+	  count = 12;
+	}
+      }
+      draw();
+      requestAnimationFrame(gameLoop);
+    }
+
+    document.addEventListener('keydown', e => {
+      if (!current || gameOver) return;
+      let moved = false, rotated = false;
+      // ←: 左移動, →: 右移動, ↓: ソフトドロップ
+      if (e.key === 'ArrowLeft') {
+        if (canMove(-1,0,0)) { current.x--; moved = true; }
+      }
+      if (e.key === 'ArrowRight') {
+        if (canMove(1,0,0)) { current.x++; moved = true; }
+      }
+      if (e.key === 'ArrowDown') {
+        if (canMove(0,1,0)) {
+          current.y++;
+          dropTimer = 0;
+          moved = true;
+        }
+      }
+      // z: 左回転, x: 右回転
+      if (e.key === 'z' || e.key === 'Z') {
+        tryRotate(3); rotated = true;
+      }
+      if (e.key === 'x' || e.key === 'X') {
+        tryRotate(1); rotated = true;
+      }
+      // 移動・回転時も滑らかに
+      puyoY = current.y;
+      if (isTouching && (moved || rotated)) {
+        lockTimer = lockDelay;
+      }
+      draw();
+    });
+
+    // ソフトドロップのためのkeydown/keyup
+    window.softDrop = false;
+    document.addEventListener('keydown', e => {
+      if (e.key === 'ArrowDown') window.softDrop = true;
+    });
+    document.addEventListener('keyup', e => {
+      if (e.key === 'ArrowDown') window.softDrop = false;
+    });
+
+    // タッチ操作用ボタンイベント（長押し対応）
+    function addTouchButtonEvent(id, action, repeatable = false) {
+      const btn = document.getElementById(id);
+      if (!btn) return;
+      let intervalId = null;
+      let repeat = () => { action(); };
+      btn.addEventListener('touchstart', function(e) {
+        e.preventDefault();
+        repeat();
+        if (repeatable) {
+          if (intervalId) clearInterval(intervalId);
+          intervalId = setInterval(repeat, 80);
+        }
+      });
+      btn.addEventListener('touchend', function(e) {
+        e.preventDefault();
+        if (intervalId) clearInterval(intervalId);
+        intervalId = null;
+      });
+      btn.addEventListener('touchcancel', function(e) {
+        if (intervalId) clearInterval(intervalId);
+        intervalId = null;
+      });
+      btn.addEventListener('mousedown', function(e) {
+        e.preventDefault();
+        repeat();
+        if (repeatable) {
+          if (intervalId) clearInterval(intervalId);
+          intervalId = setInterval(repeat, 80);
+        }
+      });
+      btn.addEventListener('mouseup', function(e) {
+        if (intervalId) clearInterval(intervalId);
+        intervalId = null;
+      });
+      btn.addEventListener('mouseleave', function(e) {
+        if (intervalId) clearInterval(intervalId);
+        intervalId = null;
+      });
+    }
+    addTouchButtonEvent('left-btn', function() {
+      if (!current || gameOver) return;
+      if (canMove(-1,0,0)) { current.x--; puyoY = current.y; draw(); }
+      if (isTouching) lockTimer = lockDelay;
+    });
+    addTouchButtonEvent('right-btn', function() {
+      if (!current || gameOver) return;
+      if (canMove(1,0,0)) { current.x++; puyoY = current.y; draw(); }
+      if (isTouching) lockTimer = lockDelay;
+    });
+    addTouchButtonEvent('down-btn', function() {
+      if (!current || gameOver) return;
+      if (canMove(0,1,0)) { current.y++; puyoY = current.y; draw(); }
+      if (isTouching) lockTimer = lockDelay;
+    }, true);
+    addTouchButtonEvent('rot-l-btn', function() {
+      if (!current || gameOver) return;
+      tryRotate(3); puyoY = current.y; draw();
+      if (isTouching) lockTimer = lockDelay;
+    });
+    addTouchButtonEvent('rot-r-btn', function() {
+      if (!current || gameOver) return;
+      tryRotate(1); puyoY = current.y; draw();
+      if (isTouching) lockTimer = lockDelay;
+    });
+
+    spawn();
+    draw();
+    requestAnimationFrame(gameLoop);
+  </script>
+</body>
+</html>
