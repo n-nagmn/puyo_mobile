@@ -1,1 +1,1 @@
-# puyopuyo_mobile
+# puyo_mobile
