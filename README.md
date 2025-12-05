@@ -53,20 +53,6 @@ const COLORS = [          // 使用する色
 ];
 ````
 
-## Tech Stack
-
-  * **HTML5 Canvas**: ゲーム画面の描画
-  * **Vanilla JavaScript**: ゲームロジック（依存ライブラリなし）
-  * **CSS3**: レイアウトとスタイリング
-
-## Directory Structure
-
-```text
-.
-├── index.html    # ゲーム本体 (puyo_mobile.htmlからリネーム推奨)
-└── README.md     # ドキュメント
-```
-
 ## License
 
 MIT License
